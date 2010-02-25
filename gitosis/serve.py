@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Enforce git-shell to only serve allowed by access control policy.
 directory. The client should refer to them without any extra directory
@@ -200,6 +201,7 @@ class Main(app.App):
             sys.exit(1)
 
         main_log.debug('Serving %s', newcmd)
+        os.putenv('GITOSIS_USER', user)
         os.execvp('git', ['git', 'shell', '-c', newcmd])
         main_log.error('Cannot execute git-shell.')
         sys.exit(1)

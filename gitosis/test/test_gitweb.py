@@ -51,6 +51,21 @@ def test_projectsList_haveOwner():
 foo%2Fbar John+Doe
 ''')
 
+def test_projectsList_haveOwnerName():
+    cfg = RawConfigParser()
+    cfg.add_section('repo foo/bar')
+    cfg.set('repo foo/bar', 'gitweb', 'yes')
+    cfg.set('repo foo/bar', 'owner', 'jdoe')
+    cfg.add_section('user jdoe')
+    cfg.set('user jdoe', 'name', 'John Doe')
+    got = StringIO()
+    gitweb.generate_project_list_fp(
+        config=cfg,
+        fp=got)
+    eq(got.getvalue(), '''\
+foo%2Fbar John+Doe jdoe
+''')
+
 def test_projectsList_multiple():
     cfg = RawConfigParser()
     cfg.add_section('gitosis')
@@ -70,8 +85,8 @@ foo%2Fbar John+Doe
 
 def test_projectsList_multiple_globalGitwebYes():
     cfg = RawConfigParser()
-    cfg.add_section('gitosis')
-    cfg.set('gitosis', 'gitweb', 'yes')
+    cfg.add_section('defaults')
+    cfg.set('defaults', 'gitweb', 'yes')
     cfg.add_section('repo foo/bar')
     cfg.set('repo foo/bar', 'owner', 'John Doe')
     cfg.add_section('repo quux')

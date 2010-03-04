@@ -36,6 +36,13 @@ def test_init_exist_dir():
     check_mode(path, 0710, is_dir=True)
     check_bare(path)
 
+def test_init_custom_perm():
+    tmp = maketemp()
+    path = os.path.join(tmp, 'repo.git')
+    repository.init(path, mode=0711)
+    check_mode(path, 0711, is_dir=True)
+    check_bare(path)
+
 def test_init_exist_git():
     tmp = maketemp()
     path = os.path.join(tmp, 'repo.git')
@@ -51,6 +58,7 @@ def test_init_templates():
         os.path.dirname(__file__),
         'mocktemplates',
         )
+    os.umask(0022)
     repository.init(path, template=templatedir)
     repository.init(path)
     got = readFile(os.path.join(path, 'no-confusion'))

@@ -9,12 +9,17 @@ import logging
 
 import sys, os, re
 
+from ConfigParser import NoSectionError, NoOptionError
+
 from gitosis import access
 from gitosis import repository
 from gitosis import gitweb
 from gitosis import gitdaemon
+from gitosis import htaccess
 from gitosis import app
 from gitosis import util
+from gitosis import group
+from gitosis import snagit
 
 log = logging.getLogger('gitosis.serve')
 
@@ -54,6 +59,76 @@ class WriteAccessDenied(AccessDenied):
 class ReadAccessDenied(AccessDenied):
     """Repository read access denied"""
 
+def auto_init_repo(cfg,topdir,repopath):
+    # create leading directories
+    p = topdir
+
+    assert repopath.endswith('.git'), 'must have .git extension'
+    newdirmode = util.getConfigDefault(cfg,
+                                       'repo %s' % repopath[:-4],
+                                       'dirmode',
+                                       None,
+                                       'defaults')
+    if newdirmode is not None:
+        newdirmode = int(newdirmode, 8)
+    else:
+        newdirmode = 0750
+
+    for segment in repopath.split(os.sep)[:-1]:
+        p = os.path.join(p, segment)
+        util.mkdir(p, newdirmode)
+
+    fullpath = os.path.join(topdir, repopath)
+
+    # init using a custom template, if required
+    try:
+        template = cfg.get('gitosis', 'init-template')
+        repository.init(path=fullpath, template=template, mode=newdirmode)
+    except (NoSectionError, NoOptionError):
+        pass
+
+    repository.init(path=fullpath, mode=newdirmode)
+
+def path_from_args(args):
+    match = ALLOW_RE.match(args)
+    if match is None:
+        raise UnsafeArgumentsError()
+
+    return match.group('path')
+
+def path_for_write(cfg, user, path):
+    # write access is always sufficient
+    newpath = access.haveAccess(
+        config=cfg,
+        user=user,
+        mode='writable',
+        path=path)
+
+    if newpath is None:
+        # didn't have write access; try once more with the popular
+        # misspelling
+        newpath = access.haveAccess(
+            config=cfg,
+            user=user,
+            mode='writeable',
+            path=path)
+        if newpath is not None:
+            log.warning(
+                'Repository %r config has typo "writeable", '
+                +'should be "writable"',
+                path,
+                )
+
+    return newpath
+
+def construct_path(newpath):
+    (topdir, relpath) = newpath
+    assert not relpath.endswith('.git'), \
+           'git extension should have been stripped: %r' % relpath
+    repopath = '%s.git' % relpath
+
+    return (topdir, repopath)
+
 def serve(
     cfg,
     user,
@@ -77,38 +152,52 @@ def serve(
             # if/when needed
             raise UnknownCommandError()
         verb = '%s %s' % (verb, subverb)
+    elif verb == 'cvs':
+        try:
+            args, server = args.split(None, 1)
+        except:
+            raise UnknownCommandError()
+        if server != 'server':
+            raise UnknownCommandError()
+
+        path = path_from_args(args)
+
+        newpath = path_for_write(cfg=cfg, user=user, path=path)
+        if newpath is None:
+            raise WriteAccessDenied()
+
+        (topdir, repopath) = construct_path(newpath)
+
+        # Put the repository and base path in the environment
+        repos_dir = util.getRepositoryDir(cfg)
+        fullpath = os.path.join(repos_dir, repopath)
+        os.environ['GIT_CVSSERVER_BASE_PATH'] = repos_dir
+        os.environ['GIT_CVSSERVER_ROOTS'] = fullpath
+
+        # Put the user's information in the environment
+        try:
+            section = 'user %s' % user
+            name = cfg.get(section, 'name')
+            email = cfg.get(section, 'email')
+        except:
+            log.error('Missing name or email for user "%s"' % user)
+            raise WriteAccessDenied()
+        os.environ['GIT_AUTHOR_NAME'] = name
+        os.environ['GIT_AUTHOR_EMAIL'] = email
+
+        return 'cvs server'
 
     if (verb not in COMMANDS_WRITE
         and verb not in COMMANDS_READONLY):
         raise UnknownCommandError()
 
-    match = ALLOW_RE.match(args)
-    if match is None:
-        raise UnsafeArgumentsError()
-
-    path = match.group('path')
+    path = path_from_args(args)
 
     # write access is always sufficient
-    newpath = access.haveAccess(
-        config=cfg,
+    newpath = path_for_write(
+        cfg=cfg,
         user=user,
-        mode='writable',
         path=path)
-
-    if newpath is None:
-        # didn't have write access; try once more with the popular
-        # misspelling
-        newpath = access.haveAccess(
-            config=cfg,
-            user=user,
-            mode='writeable',
-            path=path)
-        if newpath is not None:
-            log.warning(
-                'Repository %r config has typo "writeable", '
-                +'should be "writable"',
-                path,
-                )
 
     if newpath is None:
         # didn't have write access
@@ -126,23 +215,13 @@ def serve(
             # didn't have write access and tried to write
             raise WriteAccessDenied()
 
-    (topdir, relpath) = newpath
-    assert not relpath.endswith('.git'), \
-           'git extension should have been stripped: %r' % relpath
-    repopath = '%s.git' % relpath
+    (topdir, repopath) = construct_path(newpath)
     fullpath = os.path.join(topdir, repopath)
     if not os.path.exists(fullpath):
         # it doesn't exist on the filesystem, but the configuration
         # refers to it, we're serving a write request, and the user is
         # authorized to do that: create the repository on the fly
-
-        # create leading directories
-        p = topdir
-        for segment in repopath.split(os.sep)[:-1]:
-            p = os.path.join(p, segment)
-            util.mkdir(p, 0750)
-
-        repository.init(path=fullpath)
+        auto_init_repo(cfg,topdir,repopath)
         gitweb.set_descriptions(
             config=cfg,
             )
@@ -152,6 +231,9 @@ def serve(
             path=os.path.join(generated, 'projects.list'),
             )
         gitdaemon.set_export_ok(
+            config=cfg,
+            )
+        htaccess.gen_htaccess_if_enabled(
             config=cfg,
             )
 
@@ -190,6 +272,14 @@ class Main(app.App):
 
         os.chdir(os.path.expanduser('~'))
 
+        if (cmd == "snagit list-repos"):
+            try:
+                snagit.list_repos(cfg, user, cmd)
+                sys.exit(0)
+            except Exception, e:
+                main_log.error('%s', e)
+                sys.exit(1)
+        
         try:
             newcmd = serve(
                 cfg=cfg,
@@ -200,8 +290,9 @@ class Main(app.App):
             main_log.error('%s', e)
             sys.exit(1)
 
-        main_log.debug('Serving %s', newcmd)
+        command = ['git', 'shell', '-c', newcmd]
+        main_log.info('Serving %s', str(command))
         os.putenv('GITOSIS_USER', user)
-        os.execvp('git', ['git', 'shell', '-c', newcmd])
+        os.execvp('git', command)
         main_log.error('Cannot execute git-shell.')
         sys.exit(1)
